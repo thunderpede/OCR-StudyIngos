@@ -8,7 +8,7 @@ import concurrent.futures
 from datetime import datetime
 
 # from generate_utils import generate_random_image, save_image_and_mask
-from generate_utils_v2 import generate_random_image, save_image_and_mask
+from generate_utils import generate_random_image, save_image_and_mask
 from static.constants import backgrounds, colors, fonts, texts, opacities, sizes
 
 

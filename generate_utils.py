@@ -8,7 +8,6 @@ import PIL
 from PIL import Image, ImageFont, ImageDraw, ImageFilter
 
 import albumentations as A
-
 from albumentations.pytorch import ToTensorV2
 from albumentations.core.transforms_interface import DualTransform
 
@@ -20,9 +19,11 @@ def generate_random_image(
     colors: List[Tuple[int, int, int]], 
     backgrounds: List[str], 
     opacities: List[float], 
-    sizes: List[int]
+    sizes: List[int],
+    max_text_images: int = 5,
+    final_size: Tuple[int, int] = (512, 512)
 ) -> Tuple[np.ndarray, np.ndarray]:
-    
+
     """
     Генерирует случайное изображение и соответствующие тепловые карты.
 
@@ -33,69 +34,105 @@ def generate_random_image(
         backgrounds (List[str]): Список путей к изображениям фона.
         opacities (List[float]): Список значений прозрачности текста (0 - полностью прозрачный, 255 - полностью непрозрачный).
         sizes (List[int]): Список размеров шрифта.
+        max_text_images int: Максимальное количество тектовых объектов на изображении.
+        final_size (List[int, int]): Размер генерируемого изображения.
 
     Возвращает:
         Tuple[np.ndarray, np.ndarray, np.ndarray]: 
             - `image` (np.ndarray) — изображение с текстом.
             - `heatmap` (np.ndarray) — тепловая карта символов и связей (H, W, 2).
     """
-    
-    images = []
-    heatmaps = []
 
-    for row in range(np.random.randint(3, 5)):
-        random_text = ' '.join(random.choice(texts).split(' ')[:4])
+    background_path = random.choice(backgrounds)
+    background = Image.open(background_path).convert('RGB')
+    background_np = np.array(background)
+
+    background_np = augmentations_background(background_np)
+    background = Image.fromarray(background_np)
+
+    background = background.resize(final_size, Image.Resampling.BICUBIC)
+    final_image = np.array(background)  # np.uint8, shape (H, W, 3)
+    final_heatmap = np.zeros((final_size[1], final_size[0], 2), dtype=np.uint8)
+    # Обратите внимание, что final_size = (W, H), а shape = (H, W), поэтому везде будьте аккуратны.
+
+    text_pieces_count = random.randint(1, max_text_images)
+
+    text_images, text_heatmaps = [], []
+    for i in range(text_pieces_count):
+        random_text = random.choice(texts)[:random.randint(0, 30)]
         random_font = random.choice(fonts)
         random_color = random.choice(colors)
-        random_background = random.choice(backgrounds)
         random_opacity = random.choice(opacities)
         random_size = random.choice(sizes)
-        random_angle = random.randint(-15, 15)
         
-        image, character_mask, affinity_mask = generate_text_image(
-            text=random_text, 
-            font_path=random_font, 
-            color=random_color, 
-            font_size=random_size, 
+        piece_img, char_mask, aff_mask = generate_text_image(
+            text=random_text,
+            font_path=random_font,
+            color=random_color,
+            font_size=random_size,
             opacity=random_opacity
         )
 
-        image = image.rotate(random_angle, expand=True)
-        character_mask = np.array(Image.fromarray(character_mask).rotate(random_angle, expand=True))
-        affinity_mask = np.array(Image.fromarray(affinity_mask).rotate(random_angle, expand=True))
+        piece_img_np = np.array(piece_img)
+        hmap = np.stack([char_mask, aff_mask], axis=-1)
 
-        try:
-            width, height = image.size
-            
-            heatmap = np.zeros((height, width, 2))
-            heatmap[..., 0] = character_mask
-            heatmap[..., 1] = affinity_mask
+        if text_pieces_count == 1:
+            angle = random.randint(-70, 70)
+        elif text_pieces_count == 2:
+            angle = random.randint(-30, 30)
+        elif text_pieces_count == 3:
+            angle = random.randint(-15, 15)
+        else :
+            angle = random.randint(-5, 5)
+        
+        piece_img_np, hmap = rotate_piece(piece_img_np, hmap, angle)
+
+        if text_pieces_count == 1:
+            h, w = piece_img_np.shape[:2]
+            scale_factor = final_size[0] / float(w)
+        else:
+            scale_factor = random.uniform(0.3, 0.6)
+
+        piece_img_np, hmap = scale_piece(piece_img_np, hmap, scale_factor)
+
+        text_images.append(piece_img_np)
+        text_heatmaps.append(hmap)
+
+
+    placed_boxes = []
+    final_h, final_w = final_size[1], final_size[0]
+
+    for piece_img, piece_hmap in zip(text_images, text_heatmaps):
+        ph, pw = piece_img.shape[:2]
+
+        if pw > final_w or ph > final_h:
+           
+            forced_scale_factor = min(final_w / float(pw), final_h / float(ph)) * 0.95
+            if forced_scale_factor <= 0.1:
+                continue
+
+            piece_img, piece_hmap = scale_piece(piece_img, piece_hmap, forced_scale_factor)
+            ph, pw = piece_img.shape[:2]
+
+        for _ in range(30):
+            x = random.randint(0, final_w - pw)
+            y = random.randint(0, final_h - ph)
+            candidate_box = (x, y, x + pw, y + ph)
+            if not intersects_any(candidate_box, placed_boxes):
+                overlay_with_alpha(final_image, piece_img, x, y)
+                merge_heatmaps(final_heatmap, piece_hmap, x, y)
+                placed_boxes.append(candidate_box)
+                break
+        else:
+            pass
+
+    character_mask = np.array(Image.fromarray(final_heatmap[..., 0]).convert('L').filter(ImageFilter.GaussianBlur(radius=3)))
+    affinity_mask = np.array(Image.fromarray(final_heatmap[..., 1]).convert('L').filter(ImageFilter.GaussianBlur(radius=3)))
     
-            image = np.array(image)
-            
-            images.append(image)
-            heatmaps.append(heatmap)
-            
-        except:
-            continue
-
-    image, heatmap = merge_multiline(images, heatmaps)
-    image, heatmap = shift(image, heatmap=heatmap)
-
-    background = np.array(Image.open(random_background))
-    background, _ = image_augmentation(background, geomerty_transform=True, appearance_transform=True)
-    background = Image.fromarray(background)
-
-    image = add_paper(image, background, margins=(0, 0))
-
-    image, heatmap = image_augmentation(image, heatmap, geomerty_transform=True, appearance_transform=True, final=True)
-
-    character_mask = np.array(Image.fromarray(heatmap[..., 0]).convert('L').filter(ImageFilter.GaussianBlur(radius=3)))
-    affinity_mask = np.array(Image.fromarray(heatmap[..., 1]).convert('L').filter(ImageFilter.GaussianBlur(radius=3)))
-
-    heatmap = np.stack([character_mask, affinity_mask], axis=2)
-
-    return image, heatmap
+    final_heatmap = np.stack([character_mask, affinity_mask], axis=2)
+    final_image, final_heatmap = augmentations_image(final_image, final_heatmap)
+    
+    return final_image, final_heatmap
 
 
 
@@ -148,7 +185,7 @@ def generate_text_image(
     color: Tuple[int, int, int] = (0, 0, 0), 
     opacity: int = 255
 ) -> Tuple[PIL.Image.Image, np.ndarray, np.ndarray]:
-
+    
     """
     Создаёт изображение строки с текстом и соответствующими масками.
 
@@ -183,11 +220,8 @@ def generate_text_image(
     image_size = (right, bottom)
     
     image = Image.new('RGBA', image_size, (0, 0, 0, 0))
-    character_mask = Image.new('RGBA', image_size, (0, 0, 0, 0))
-    affinity_mask = Image.new('RGBA', image_size, (0, 0, 0, 0))
-
-    character_mask = np.zeros((bottom, right))
-    affinity_mask = np.zeros((bottom, right))
+    character_mask = np.zeros((bottom, right), dtype=np.uint8)
+    affinity_mask = np.zeros((bottom, right), dtype=np.uint8)
 
     draw_image = ImageDraw.Draw(image)
     
@@ -195,7 +229,7 @@ def generate_text_image(
     
     gaussian_size = 200
     gaussian = generate_gaussian(size=gaussian_size, sigma=0.4, crop=10)
-    color = tuple(color + [opacity])
+    text_color = tuple(list(color) + [opacity])
 
     character_boxes, affinity_points = [], []
     for char in text:
@@ -219,12 +253,10 @@ def generate_text_image(
         top_triangle = [(bbox[0], bbox[1]), (center_char_x, center_char_y), (bbox[2], bbox[1])]
         bottom_triangle = [(bbox[0], bbox[3]), (center_char_x, center_char_y), (bbox[2], bbox[3])]
 
-        top_center = get_triangle_center(top_triangle)
-        bottom_center = get_triangle_center(bottom_triangle)
-
         character_boxes.append(bbox)
-        affinity_points.append((top_center, bottom_center))      
+        affinity_points.append((top_triangle, bottom_triangle))      
 
+        # Перспективное преобразование гауссианы под размер символа
         square_points = np.array([[0, 0], [gaussian_size, 0], [gaussian_size, gaussian_size], [0, gaussian_size]], dtype=np.float32)
         target_points = np.array([
             [new_bbox[0], new_bbox[1]], [new_bbox[2], new_bbox[1]],
@@ -236,72 +268,205 @@ def generate_text_image(
         mask = warped_gaussian > character_mask
         character_mask[mask] = warped_gaussian[mask]
         
-
         if draw_points:
-            draw_image.rectangle(bbox, outline='green', width=3)
-            draw_image.ellipse([center_char_x - 2, center_char_y - 2, center_char_x + 2, center_char_y + 2], fill='green', width=3)
-            draw_image.polygon(top_triangle, outline='blue', width=3)
-            draw_image.polygon(bottom_triangle, outline='blue', width=3)
-            draw_image.ellipse([top_center[0] - 2, top_center[1] - 2, top_center[0] + 2, top_center[1] + 2], fill="blue", width=3)
-            draw_image.ellipse([bottom_center[0] - 2, bottom_center[1] - 2, bottom_center[0] + 2, bottom_center[1] + 2], fill="blue", width=3)
-
-        draw_image.text((prev_x, prev_y), char, font=font, fill=color)
+            draw_image.rectangle(bbox, outline='green', width=1)
+        draw_image.text((prev_x, prev_y), char, font=font, fill=text_color)
 
         if interval != 0:
             prev_x += width + interval
         else:
             prev_x += width
     
-    affinity_polygons = []
+    # Формируем affinity-маску
     for i in range(len(affinity_points) - 1):
-        current_char = affinity_points[i]
-        next_char = affinity_points[i + 1]
-        
-        if next_char == -1:
+        cur = affinity_points[i]
+        nxt = affinity_points[i + 1]
+        if cur == -1 or nxt == -1:
             continue
-        
-        if current_char != -1:
-            polygon = (current_char[0], current_char[1], next_char[1], next_char[0])
-            affinity_polygons.append(polygon)
+        # cur, nxt содержат треугольники (top, bottom)
+        # Для простоты генерируем гауссиану между нижней частью одного символа и верхней частью следующего
+        # Но в вашем коде своя логика, оставим всё, как есть, по аналогии
+        top_triangle_cur, bottom_triangle_cur = cur
+        top_triangle_nxt, bottom_triangle_nxt = nxt
 
-            new_polygon = scale_polygon(polygon, scale=scale+0.2)
-            
-            mean_x = np.mean([current_char[0][0], current_char[1][0], next_char[1][0], next_char[0][0]])
-            mean_y = np.mean([current_char[0][1], current_char[1][1], next_char[1][1], next_char[0][1]])
+        # Вычислим центры
+        top_center_cur = get_triangle_center(top_triangle_cur)
+        bottom_center_cur = get_triangle_center(bottom_triangle_cur)
+        top_center_nxt = get_triangle_center(top_triangle_nxt)
+        bottom_center_nxt = get_triangle_center(bottom_triangle_nxt)
 
-            # Определяем 4 точки квадрата для перспективного трансформа
-            square_points = np.array([[0, 0], [gaussian_size, 0], [gaussian_size, gaussian_size], [0, gaussian_size]], dtype=np.float32)
-            target_points = np.array(new_polygon, dtype=np.float32)
+        # 4 точки для affinity
+        polygon = [bottom_center_cur, bottom_center_nxt, top_center_nxt, top_center_cur]
 
-            # Вычисляем матрицу трансформации
-            M = cv2.getPerspectiveTransform(square_points, target_points)
+        # Увеличим полигон
+        polygon_scaled = scale_polygon(polygon, scale=1.2)
 
-            # Применяем перспективное преобразование
-            warped_gaussian = cv2.warpPerspective(gaussian, M, (image_size[0], image_size[1]))
+        # Перспективная трансформация
+        gaussian_size = 200
+        gaussian = generate_gaussian(size=gaussian_size, sigma=0.4, crop=10)
 
-            mask = warped_gaussian > affinity_mask
-            affinity_mask[mask] = warped_gaussian[mask]
+        square_pts = np.array([[0, 0], [gaussian_size, 0], [gaussian_size, gaussian_size], [0, gaussian_size]], dtype=np.float32)
+        target_pts = np.array(polygon_scaled, dtype=np.float32)
 
-        
-    image = image.crop((0, 0, prev_x + 20, bottom))
-    character_mask = character_mask[:, : prev_x + 20]
-    affinity_mask = affinity_mask[:, : prev_x + 20]
-    
+        M = cv2.getPerspectiveTransform(square_pts, target_pts)
+        warped_gaussian = cv2.warpPerspective(gaussian, M, (image_size[0], image_size[1]))
+
+        mask = warped_gaussian > affinity_mask
+        affinity_mask[mask] = warped_gaussian[mask]
+
+    piece_width = prev_x + 20
+    piece_height = bottom
+    image = image.crop((0, 0, piece_width, piece_height))
+    character_mask = character_mask[:piece_height, :piece_width]
+    affinity_mask = affinity_mask[:piece_height, :piece_width]
 
     return image, character_mask, affinity_mask
 
 
 
+def augmentations_image(image, mask):
+    geometry_augmentations = A.Compose([
+        A.Perspective(scale=(0.0, 0.001), p=0.5, keep_size=False),
+        A.Rotate(limit=5, border_mode=cv2.BORDER_REFLECT, p=0.5),
+    ], additional_targets={'mask': 'mask'})
+    
+    appearance_augmentations = A.Compose([
+        A.GaussNoise(std_range=(0.01, 0.05), p=0.5),
+        A.MedianBlur(blur_limit=3, p=0.2), 
+        A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
+        A.RandomGamma(gamma_limit=(80, 120), p=0.5),
+        A.HueSaturationValue(p=1)        
+    ])
+
+    augmented = geometry_augmentations(image=image, mask=mask)
+    image, mask = augmented['image'], augmented['mask']
+    
+    augmented = appearance_augmentations(image=image)
+    image = augmented['image']
+
+    return image, mask
+
+
+def augmentations_background(background):
+    augmentations = A.Compose([
+        A.HorizontalFlip(p=0.5),  # Отражение по горизонтали
+        A.Perspective(p=0.5, keep_size=True),  # Перспективные искажения
+        A.Rotate(limit=30, border_mode=cv2.BORDER_REFLECT, p=0.5),
+        A.GaussNoise(std_range=(0.01, 0.05), p=0.5),  # Шум
+        A.MedianBlur(blur_limit=3, p=0.2),  # Размытие медианным фильтром
+        A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
+        A.RandomGamma(gamma_limit=(80, 120), p=0.5),  # Случайное изменение гаммы
+        A.HueSaturationValue(p=0.5)
+    ])
+    
+    return augmentations(image=background)['image']
+
+
+def rotate_piece(piece_img: np.ndarray, heatmap: np.ndarray, angle: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Поворачивает кусок (RGBA или RGB) и соответствующий heatmap
+    на заданный угол (в градусах).
+    """
+    # piece_img shape: (H, W, 4) (если RGBA) или (H, W, 3) (если RGB)
+    # heatmap shape: (H, W, 2)
+
+    pil_img = Image.fromarray(piece_img)
+    rotated_img = pil_img.rotate(angle, expand=True)
+    rotated_img_np = np.array(rotated_img)
+
+    pil_ch0 = Image.fromarray(heatmap[..., 0])
+    pil_ch1 = Image.fromarray(heatmap[..., 1])
+    rot_ch0 = pil_ch0.rotate(angle, expand=True)
+    rot_ch1 = pil_ch1.rotate(angle, expand=True)
+    ch0_np = np.array(rot_ch0)
+    ch1_np = np.array(rot_ch1)
+
+    heatmap_new = np.stack([ch0_np, ch1_np], axis=-1)
+    return rotated_img_np, heatmap_new
+
+
+def scale_piece(piece_img: np.ndarray, heatmap: np.ndarray, scale_factor: float) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Масштабирует кусок изображения piece_img и heatmap
+    """
+    h, w = piece_img.shape[:2]
+    new_w = max(1, int(w * scale_factor))
+    new_h = max(1, int(h * scale_factor))
+
+    # Масштабируем картинку
+    pil_img = Image.fromarray(piece_img)
+    pil_img = pil_img.resize((new_w, new_h), Image.Resampling.BICUBIC)
+    piece_img_scaled = np.array(pil_img)
+
+    # Масштабируем каналы heatmap
+    ch0 = Image.fromarray(heatmap[..., 0])
+    ch1 = Image.fromarray(heatmap[..., 1])
+    ch0 = ch0.resize((new_w, new_h), Image.Resampling.BICUBIC)
+    ch1 = ch1.resize((new_w, new_h), Image.Resampling.BICUBIC)
+
+    hmap_scaled = np.stack([np.array(ch0), np.array(ch1)], axis=-1)
+
+    return piece_img_scaled, hmap_scaled
+
+
+def intersects_any(box: Tuple[int, int, int, int], boxes: List[Tuple[int, int, int, int]]) -> bool:
+    """
+    Проверяет, пересекается ли box с любым из списка boxes.
+    box в формате (x1, y1, x2, y2).
+    """
+    x1, y1, x2, y2 = box
+    for xb1, yb1, xb2, yb2 in boxes:
+        # Горизонтальное пересечение?
+        overlap_x = not (x2 < xb1 or x1 > xb2)
+        # Вертикальное пересечение?
+        overlap_y = not (y2 < yb1 or y1 > yb2)
+        if overlap_x and overlap_y:
+            return True
+    return False
+
+
+def overlay_with_alpha(base_img: np.ndarray, overlay_img: np.ndarray, x: int, y: int) -> None:
+    """
+    Накладывает overlay_img (RGBA) на base_img (RGB) 
+    с учётом альфа-канала, начиная с координат (x,y) в base_img.
+    Изменяет base_img на месте.
+    """
+    if overlay_img.shape[-1] == 3:
+        # Нет альфа-канала, просто накладываем как есть
+        oh, ow = overlay_img.shape[:2]
+        base_img[y:y+oh, x:x+ow] = overlay_img
+        return
+
+    # RGBA вариант
+    oh, ow = overlay_img.shape[:2]
+    alpha_s = overlay_img[:, :, 3] / 255.0
+    for c in range(3):  # для R, G, B
+        base_img[y:y+oh, x:x+ow, c] = (
+            alpha_s * overlay_img[:, :, c] + 
+            (1 - alpha_s) * base_img[y:y+oh, x:x+ow, c]
+        )
+
+
+def merge_heatmaps(base_heatmap: np.ndarray, overlay_heatmap: np.ndarray, x: int, y: int) -> None:
+    """
+    Простейшее объединение heatmap'ов.
+    Можно делать np.maximum, np.add, усреднение и т.д.
+    Меняем base_heatmap на месте.
+    """
+    oh, ow = overlay_heatmap.shape[:2]
+    region = base_heatmap[y:y+oh, x:x+ow, :]
+    # например, возьмём максимум
+    base_heatmap[y:y+oh, x:x+ow, :] = np.maximum(region, overlay_heatmap)
+
+
 def generate_gaussian(size=30, sigma=1., crop=False):
-    """
-    Создаёт квадратную гауссиану.
-    """
     x = np.linspace(-1, 1, size)
     y = np.linspace(-1, 1, size)
     x, y = np.meshgrid(x, y)
     gaussian = np.exp(-(x**2 + y**2) / (2 * sigma**2))
     gaussian = (gaussian * 255).astype(np.uint8)
-    if crop: gaussian[gaussian < crop] = 0
+    if crop:
+        gaussian[gaussian < crop] = 0
     return gaussian
 
 
@@ -312,138 +477,39 @@ def get_triangle_center(triangle):
 
 
 def scale_polygon(polygon, scale=1.1):
-    """
-    Увеличивает полигон на заданный коэффициент относительно его центра.
-    
-    :param polygon: Список кортежей (x, y) вершин полигона
-    :param scale: Коэффициент увеличения
-    :return: Новый полигон с увеличенными координатами
-    """
     polygon = np.array(polygon, dtype=np.float32)
-    center = np.mean(polygon, axis=0)  # Находим центр полигона
-    
-    # Увеличиваем расстояние от центра до каждой точки
+    center = np.mean(polygon, axis=0)
     scaled_polygon = center + (polygon - center) * scale 
     return [tuple(point) for point in scaled_polygon]
 
 
+def overlay_with_alpha(base_img, overlay_img, x, y):
+    oh, ow = overlay_img.shape[:2]
+    bh, bw = base_img.shape[:2]
 
-def cvt2HeatmapImg(img):
-    img = (np.clip(img, 0, 1) * 255).astype(np.uint8)
-    img = cv2.applyColorMap(img, cv2.COLORMAP_JET)
-    return img
-    
-def add_heatmap2img(img,heatmap):
-    color_heatmap = cvt2HeatmapImg(heatmap)
-    return cv2.addWeighted(color_heatmap, 0.5,img ,0.5,0)
+    # Если фрагмент «вылез» за правый или нижний край:
+    max_x = x + ow
+    max_y = y + oh
 
-def merge_multiline(imgs: list, heatmaps: list) -> tuple[np.ndarray, np.ndarray]:
-    spacings = []
-    width, height = 0, 0
-    for img in imgs:
-        img_h, img_w, channels = img.shape
-        
-        spacing = np.random.randint(5,10+1) # change TODO
-        if img_h + spacing < 0:
-            spacing = 0
-        spacings.append(spacing)
+    # Обрезаем overlay_img, если выходит за границы
+    # 1) Вычислим, какие координаты реально влезают
+    if max_x > bw:  # выходит за правый край
+        ow = bw - x  # ширина, которая влезет
+    if max_y > bh:  # выходит за нижний край
+        oh = bh - y  # высота, которая влезет
 
-        width = max(width, img_w)
-        height += img_h
-        height += spacing
-    height -= spacing
+    if ow <= 0 or oh <= 0:
+        # вообще не помещается
+        return
 
-    combined_img = np.zeros((height, width, channels), dtype="uint16")
-    combined_heatmap = np.zeros((height, width, 2), dtype="float64")
-    y_start = 0
-    for i, (img, heatmap) in enumerate(zip(imgs, heatmaps)):
-        img_h, img_w, _ = img.shape
-        x_start = np.random.randint(0, width - img_w +1)
-        combined_img[y_start:y_start + img_h, x_start:x_start + img_w, :] += img
-        combined_heatmap[y_start:y_start + img_h, x_start:x_start + img_w, :] += heatmap
-        y_start += img_h + spacings[i]
-    combined_img = np.clip(combined_img, 0, 255).astype("uint8")
+    # Обрезаем overlay_img (само изображение и альфа-канал) 
+    # только если нужно:
+    overlay_cropped = overlay_img[:oh, :ow, :]
 
-    return combined_img, combined_heatmap
-
-def shift(img: np.ndarray, heatmap: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    margins = (15,15) # TODO
-    pad_left = np.random.randint(margins[0]) if margins[0] > 0 else 0
-    pad_top = np.random.randint(margins[1]) if margins[1] > 0 else 0
-    pad_right = np.random.randint(margins[0]) if margins[0] > 0 else 0
-    pad_bottom = np.random.randint(margins[1]) if margins[1] > 0 else 0
-
-    h, w, _ = heatmap.shape
-    new_w = pad_left + w + pad_right
-    new_h = pad_top + h + pad_bottom
-
-    shifted_new_img = np.zeros((new_h, new_w, img.shape[-1]), dtype="uint8")
-    shifted_new_img[pad_top:h + pad_top, pad_left:w + pad_left, :] += img
-
-    shifted_heatmap = np.zeros((new_h, new_w, 2))
-    shifted_heatmap[pad_top:h + pad_top, pad_left:w + pad_left] += heatmap
-
-    return shifted_new_img, shifted_heatmap
-
-def pad_to_size(img: Image.Image, size: tuple):
-    new_img = Image.new("RGBA", size, (255, 255, 255, 0))
-    x_marg = (size[0] - img.size[0]) // 2
-    y_marg = (size[1] - img.size[1]) // 2
-    new_img.paste(img, (x_marg, y_marg))
-    return new_img
-    
-def fetch_paper_fragment(img: Image.Image, back: Image.Image, margins: tuple[int, int] = (10, 10)):
-    back = back.convert("RGBA")
-    size = tuple([d + margin * 2 for d, margin in zip(img.size, margins)])
-    if back.size[0] < size[0] or back.size[1] < size[1]:
-        back = back.resize(size, Image.Resampling.BICUBIC)
-    xrange = back.size[0] - size[0]
-    yrange = back.size[1] - size[1]
-    x = random.randint(0, xrange)
-    y = random.randint(0, yrange)
-    return back.crop((x, y, x + size[0], y + size[1]))
-    
-def add_paper(img: np.ndarray, paper_path: Image.Image, margins: tuple[int, int] = None) -> np.ndarray:
-    img = Image.fromarray(img)
-    margins = margins if margins is not None else margins
-    paper = fetch_paper_fragment(img, back=paper_path, margins=margins)
-    img = pad_to_size(img, paper.size)
-    img = Image.alpha_composite(paper, img)
-    img = np.array(img)
-    return img
-
-
-def image_augmentation(image, mask=None, geomerty_transform=False, appearance_transform=False, final=False):
-    geometry_augmentations = A.Compose([
-        # A.HorizontalFlip(p=0.5),  # Отражение по горизонтали
-        A.Perspective(scale=(0.0, 0.001), p=0.5, keep_size=False),  # Перспективные искажения
-        A.Rotate(limit=5, border_mode=cv2.BORDER_REFLECT, p=0.5),
-    ], additional_targets={'mask': 'mask'})  # Указываем, что маска трансформируется так же
-    
-    appearance_augmentations = A.Compose([
-        A.GaussNoise(std_range=(0.01, 0.05), p=0.5),  # Шум
-        A.MedianBlur(blur_limit=3, p=0.2),  # Размытие медианным фильтром
-        A.RandomBrightnessContrast(brightness_limit=(-0.2, 0.2), contrast_limit=(-0.2, 0.2), p=0.5),
-        A.RandomGamma(gamma_limit=(80, 120), p=0.5),  # Случайное изменение гаммы
-        A.HueSaturationValue(p=0.5)        
-    ])
-
-    if final:
-        image = np.array(Image.fromarray(image).convert('RGB'))
-
-    if geomerty_transform:
-        augmented = geometry_augmentations(image=image, mask=mask)
-        image, mask = augmented['image'], augmented['mask']
-        
-    if appearance_transform:
-        augmented = appearance_augmentations(image=image)
-        image = augmented['image']
-
-    return image, mask
-
-
-
-
-
-
-        
+    alpha_s = overlay_cropped[:, :, 3] / 255.0  # (oh, ow)
+    # Далее обычная схема:
+    for c in range(3):
+        base_img[y:y+oh, x:x+ow, c] = (
+            alpha_s * overlay_cropped[:, :, c] +
+            (1 - alpha_s) * base_img[y:y+oh, x:x+ow, c]
+        )
