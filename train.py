@@ -3,16 +3,14 @@ import argparse
 
 from datetime import datetime
 
-from loss_functions import DiceFocalLoss
+from torch.nn import MSELoss
 
-from train_utils import SegformerForСraft
-from transformers import SegformerImageProcessor
+from train_utils import SegformerForСraft, compute_metrics, seed_everything, save_training_results
+
+from transformers import SegformerImageProcessor, TrainingArguments, Trainer, EarlyStoppingCallback
 
 from sklearn.model_selection import train_test_split
 from train_utils import CRAFTDataset, craft_data_collator, collect_data
-
-from transformers import TrainingArguments, Trainer
-from train_utils import compute_metrics, inference_sample
 
 
 if __name__ == '__main__':
@@ -50,14 +48,20 @@ if __name__ == '__main__':
 		logging_steps=50,
 		learning_rate=args.learning_rate,
 		weight_decay=args.weight_decay,
-		eval_accumulation_steps=50
+		eval_accumulation_steps=50,
+		metric_for_best_model="eval_loss",
+		greater_is_better=False,
+		load_best_model_at_end=True
 	)
 
+	seed_everything(seed=37)
+
 	feature_extractor = SegformerImageProcessor.from_pretrained(model_name)
-	model = SegformerForСraft.from_pretrained(model_name, num_labels=2, ignore_mismatched_sizes=True)
+	model = SegformerForСraft.from_pretrained(
+		model_name, num_labels=2, ignore_mismatched_sizes=True, loss_fn=MSELoss()
+	)
 
 	dataset = collect_data(input_dir)
-
 	train, test = train_test_split(dataset, test_size=0.2, random_state=37)
 	train, test = train.reset_index(drop=True), test.reset_index(drop=True)
 
@@ -78,13 +82,21 @@ if __name__ == '__main__':
 		train_dataset=train_dataset,
 		eval_dataset=test_dataset,
 		data_collator=craft_data_collator,
-		compute_metrics=compute_metrics
+		compute_metrics=compute_metrics,
+		callbacks=[EarlyStoppingCallback(
+			early_stopping_patience=5,
+			early_stopping_threshold=0.0
+		)]
 	)
 
 	start_time = datetime.now()
 	print(f'Старт обучения ({start_time.strftime('%Y-%m-%d %H:%M:%S')})')
 	
 	trainer.train()
+	save_training_results(trainer, BASE_DIR)
 
 	stop_time = datetime.now()
 	print(f'Обучение завершено ({stop_time.strftime('%Y-%m-%d %H:%M:%S')})')
+
+
+

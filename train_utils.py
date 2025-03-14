@@ -3,11 +3,10 @@ import os
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 
 from joblib import Parallel, delayed
 import concurrent.futures
-import multiprocessing
-
 
 from tqdm import tqdm
 from PIL import Image, ImageDraw
@@ -29,13 +28,12 @@ from torchvision.transforms import ToPILImage
 
 
 class SegformerForСraft(SegformerPreTrainedModel):
-    def __init__(self, config):
+    def __init__(self, config, loss_fn=None):
         super().__init__(config)
         
         self.segformer = SegformerModel(config)
         self.decode_head = SegformerDecodeHead(config)
-        self.loss_fn = DiceFocalLoss()
-
+        self.loss_fn = loss_fn if loss_fn else DiceFocalLoss()
         self.init_weights()
 
     def forward(self, pixel_values, labels=None, output_attentions=None, 
@@ -420,9 +418,9 @@ def calculate_metric(pred_bboxes_list, gt_bboxes_list, iou_threshold=0.5):
 def inference_sample(model, feature_extractor, image, tt=0.1, lt=0.1, lwt=0.1):
     model.to('cpu')
     img = image.copy()
-    tt, lt, lwt = tt * 255., lt * 255., lwt * 255. 
+    tt, lt, lwt = tt * 255., lt * 255., lwt * 255.
     width, height = img.size
-    
+
     encoding_image = feature_extractor(
         img,
         size=512,
@@ -438,23 +436,64 @@ def inference_sample(model, feature_extractor, image, tt=0.1, lt=0.1, lwt=0.1):
 
     upsampled_logits = nn.functional.interpolate(
         outputs['logits'],
-        size=[height, width], # (height, width)
+        size=[height, width],  # (height, width)
         mode='bilinear',
         align_corners=False
     )
 
     to_pill = ToPILImage()
-    
+
     character_heatmap = to_pill(upsampled_logits[0][0])
     affinity_heatmap = to_pill(upsampled_logits[0][1])
-        
-    boxes_pred, _, _ = craft_utils.getDetBoxes(np.array(character_heatmap), np.array(affinity_heatmap), tt, lt, lwt)
-    
-    draw = ImageDraw.Draw(img)
-    bbox_color = (255, 0, 0)  
-    bbox_width = 1
-    
-    for bbox in boxes_pred:
-        draw.rectangle(bbox, outline='red', width=5)
 
-    return img, boxes_pred
+    boxes_pred, _, _ = craft_utils.getDetBoxes(np.array(character_heatmap), np.array(affinity_heatmap), tt, lt, lwt)
+
+    draw = ImageDraw.Draw(img)
+    bbox_color = (255, 0, 0)
+    bbox_width = 3
+
+    for bbox in boxes_pred:
+        draw.rectangle(bbox, outline=bbox_color, width=bbox_width)
+
+    return img, boxes_pred, (character_heatmap, affinity_heatmap)
+
+
+def save_training_results(trainer, save_dir):
+    log_history = trainer.state.log_history
+    df = pd.DataFrame(log_history)
+
+    plt.subplots(1, 2, figsize=(16, 5))
+    plt.subplot(1, 2, 1)
+
+    train_loss = df[df["loss"].notna()]
+    plt.plot(train_loss["step"], train_loss["loss"], label="Train Loss", marker="o")
+
+    val_loss = df[df["eval_loss"].notna()]
+    plt.plot(val_loss["step"], val_loss["eval_loss"], label="Validation Loss", marker="o")
+
+    plt.xlabel("Training Steps")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
+    plt.grid()
+
+    plt.subplot(1, 2, 2)
+    for metric in ["eval_mean_iou", "eval_f1", "eval_precision", "eval_recall"]:
+        plt.plot(df[df[metric].notna()]['step'], df[metric].dropna(), label=metric, marker="o")
+
+    plt.xlabel("Training Steps")
+    plt.ylabel("Metric Value")
+    plt.title("Evaluation Metrics Over Time")
+    plt.legend()
+    plt.grid()
+
+    plt.savefig(os.path.join(save_dir, 'training_plots.png'), bbox_inches='tight', pad_inches=0.1)
+    df.to_csv(os.path.join(save_dir, 'training_log.csv'), index=False)
+
+
+def seed_everything(seed):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True

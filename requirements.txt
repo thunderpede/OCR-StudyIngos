@@ -1,0 +1,14 @@
+albumentations==2.0.5
+joblib==1.4.2
+numpy==2.2.3
+pandas==2.2.3
+Pillow==11.1.0
+scikit_learn==1.6.1
+torch==2.6.0
+torchvision==0.21.0
+tqdm==4.67.1
+transformers==4.49.0
+opencv_python==4.11.0.86
+accelerate>=0.26.0
+matplotlib==3.10.1
+
