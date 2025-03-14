@@ -5,12 +5,12 @@ from datetime import datetime
 
 from torch.nn import MSELoss
 
-from train_utils import SegformerForСraft, compute_metrics, seed_everything, save_training_results
+from utils.train_utils import SegformerForСraft, compute_metrics, seed_everything, save_training_results
 
 from transformers import SegformerImageProcessor, TrainingArguments, Trainer, EarlyStoppingCallback
 
 from sklearn.model_selection import train_test_split
-from train_utils import CRAFTDataset, craft_data_collator, collect_data
+from utils.train_utils import CRAFTDataset, craft_data_collator, collect_data
 
 
 if __name__ == '__main__':

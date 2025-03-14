@@ -19,7 +19,7 @@ from typing import Dict, Any, List, Tuple, Optional
 
 from loss_functions import DiceFocalLoss
 
-import craft_utils
+from utils import craft_utils
 
 from transformers.modeling_outputs import SequenceClassifierOutput
 from transformers.models.segformer.modeling_segformer import SegformerPreTrainedModel, SegformerModel, SegformerDecodeHead
